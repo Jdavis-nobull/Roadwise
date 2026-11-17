@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live location - Roadwise</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#fff; --fg:#202124; --muted:#5f6368; --card:#ffffff; --accent:#1a73e8; --live:#e53935; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#17181a; --fg:#e8eaed; --muted:#9aa0a6; --card:#202124; --accent:#8ab4f8; } }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  #map { position:absolute; inset:0; }
+  .card { position:absolute; left:12px; right:12px; bottom:16px; z-index:1000; background:var(--card); border-radius:20px;
+          box-shadow:0 6px 24px rgba(0,0,0,.25); padding:14px 16px; max-width:520px; margin:0 auto; }
+  .row { display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--live); box-shadow:0 0 0 0 rgba(229,57,53,.6); animation:p 1.6s infinite; }
+  .dot.off { background:#9aa0a6; animation:none; }
+  @keyframes p { 0%{box-shadow:0 0 0 0 rgba(229,57,53,.6)} 70%{box-shadow:0 0 0 10px rgba(229,57,53,0)} 100%{box-shadow:0 0 0 0 rgba(229,57,53,0)} }
+  h1 { font-size:18px; margin:0; }
+  .muted { color:var(--muted); font-size:14px; margin-top:4px; }
+  .eta { font-size:22px; font-weight:700; color:#0f9d58; margin-top:6px; }
+  button { margin-top:10px; border:0; background:var(--accent); color:#fff; border-radius:12px; padding:8px 14px; font-size:14px; }
+  .me { width:22px; height:22px; border-radius:50%; background:#1a73e8; border:3px solid #fff; box-shadow:0 2px 8px rgba(0,0,0,.4); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="card">
+  <div class="row"><div id="dot" class="dot"></div><h1 id="title">Loading...</h1></div>
+  <div id="eta" class="eta" hidden></div>
+  <div id="sub" class="muted"></div>
+  <button id="follow" type="button">Follow</button>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function () {
+  const id = location.pathname.split('/').pop();
+  const api = location.pathname.replace(/\/live\/[^/]+$/, '') + '/api/live/' + encodeURIComponent(id);
+  const map = L.map('map', { zoomControl: false }).setView([39.8, -98.6], 4);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+  const meIcon = L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [22, 22], iconAnchor: [11, 11] });
+  let me = null, dest = null, trail = null, first = true, follow = true;
+  const $ = (x) => document.getElementById(x);
+  $('follow').onclick = () => { follow = true; if (me) map.setView(me.getLatLng(), Math.max(map.getZoom(), 15)); };
+  map.on('dragstart', () => { follow = false; });
+
+  function ago(t) {
+    const s = Math.round((Date.now() - t) / 1000);
+    if (s < 60) return s + ' sec ago';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    return Math.round(s / 3600) + ' hr ago';
+  }
+  function dist(m, imp) {
+    if (m == null) return '';
+    if (imp) { const mi = m / 1609.344; return mi >= 0.2 ? mi.toFixed(mi < 10 ? 1 : 0) + ' mi' : Math.round(m * 3.28084 / 50) * 50 + ' ft'; }
+    return m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.round(m / 10) * 10 + ' m';
+  }
+
+  async function tick() {
+    let d;
+    try {
+      const r = await fetch(api, { cache: 'no-store' });
+      if (r.status === 404) { $('title').textContent = 'This link has expired'; $('dot').className = 'dot off'; $('sub').textContent = ''; return; }
+      d = await r.json();
+    } catch (e) { $('sub').textContent = 'Connection problem - retrying...'; setTimeout(tick, 8000); return; }
+
+    const name = d.name || 'Someone';
+    $('dot').className = d.active ? 'dot' : 'dot off';
+    if (d.arrived) $('title').textContent = name + ' has arrived' + (d.dest && d.dest.name ? ' at ' + d.dest.name : '');
+    else if (!d.active) $('title').textContent = name + ' stopped sharing';
+    else $('title').textContent = name + (d.dest && d.dest.name ? ' is on the way to ' + d.dest.name : "'s live location");
+
+    if (d.active && d.eta && !d.arrived) {
+      $('eta').hidden = false;
+      const t = new Date(d.eta);
+      const mins = Math.max(0, Math.round((d.eta - Date.now()) / 60000));
+      $('eta').textContent = 'Arriving ' + t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + ' · ' + mins + ' min';
+    } else $('eta').hidden = true;
+
+    const parts = [];
+    if (d.pos) {
+      parts.push('Updated ' + ago(d.pos.t));
+      if (d.active && d.pos.speed > 1) parts.push(d.imperial ? Math.round(d.pos.speed * 2.23694) + ' mph' : Math.round(d.pos.speed * 3.6) + ' km/h');
+      if (d.active && d.remainingM != null && !d.arrived) parts.push(dist(d.remainingM, d.imperial) + ' to go');
+      const ll = [d.pos.lat, d.pos.lon];
+      if (!me) me = L.marker(ll, { icon: meIcon }).addTo(map); else me.setLatLng(ll);
+      if (first || follow) { map.setView(ll, first ? 15 : map.getZoom()); first = false; }
+    } else parts.push(d.active ? 'Waiting for the first location...' : '');
+    $('sub').textContent = parts.filter(Boolean).join(' · ');
+
+    if (d.trail && d.trail.length > 1) {
+      if (!trail) trail = L.polyline(d.trail, { color: '#1a73e8', weight: 5, opacity: 0.7 }).addTo(map); else trail.setLatLngs(d.trail);
+    }
+    if (d.dest) {
+      const ll = [d.dest.lat, d.dest.lon];
+      if (!dest) dest = L.marker(ll, { title: d.dest.name || 'Destination' }).addTo(map); else dest.setLatLng(ll);
+    }
+    if (d.active) setTimeout(tick, 5000);
+  }
+  tick();
+})();
+</script>
+</body>
+</html>
